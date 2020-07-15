@@ -152,7 +152,7 @@ impl Client {
     /// Once we've got the version byte, we then delegate to the below
     /// `serve_vX` methods depending on which version we found.
     fn serve(self, conn: TcpStream)
-              -> Box<Future<Item=(u64, u64), Error=io::Error>> {
+              -> Box<dyn Future<Item=(u64, u64), Error=io::Error>> {
         Box::new(read_exact(conn, [0u8]).and_then(|(conn, buf)| {
             match buf[0] {
                 v5::VERSION => self.serve_v5(conn),
@@ -162,15 +162,15 @@ impl Client {
                 // which represents that this future has immediately failed. In
                 // this case the type of the future is `io::Error`, so we use a
                 // helper function, `other`, to create an error quickly.
-                _ => future::err(other("unknown version")).boxed(),
+                _ => Box::new(future::err(other("unknown version"))),
             }
         }))
     }
 
     /// Current SOCKSv4 is not implemented, but v5 below has more fun details!
     fn serve_v4(self, _conn: TcpStream)
-                -> Box<Future<Item=(u64, u64), Error=io::Error>> {
-        future::err(other("unimplemented")).boxed()
+                -> Box<dyn Future<Item=(u64, u64), Error=io::Error>> {
+        Box::new(future::err(other("unimplemented")))
     }
 
     /// The meat of a SOCKSv5 handshake.
@@ -179,13 +179,13 @@ impl Client {
     /// suite of handshakes, and at the end if we've successfully gotten that
     /// far we'll initiate the proxying between the two sockets.
     ///
-    /// As a side note, you'll notice a number of `.boxed()` annotations here to
+    /// As a side note, you'll notice a number of `Box::new` calls here to
     /// box up intermediate futures. From a library perspective, this is not
     /// necessary, but without them the compiler is pessimistically slow!
-    /// Essentially, the `.boxed()` annotations here improve compile times, but
+    /// Essentially, the `Box::new` calls here improve compile times, but
     /// are otherwise not necessary.
     fn serve_v5(self, conn: TcpStream)
-                -> Box<Future<Item=(u64, u64), Error=io::Error>> {
+                -> Box<dyn Future<Item=(u64, u64), Error=io::Error>> {
         // First part of the SOCKSv5 protocol is to negotiate a number of
         // "methods". These methods can typically be used for various kinds of
         // proxy authentication and such, but for this server we only implement
@@ -200,7 +200,7 @@ impl Client {
         // another, but it also serves to simply have fallible computations,
         // such as checking whether the list of methods contains `METH_NO_AUTH`.
         let num_methods = read_exact(conn, [0u8]);
-        let authenticated = num_methods.and_then(|(conn, buf)| {
+        let authenticated = Box::new(num_methods.and_then(|(conn, buf)| {
             read_exact(conn, vec![0u8; buf[0] as usize])
         }).and_then(|(conn, buf)| {
             if buf.contains(&v5::METH_NO_AUTH) {
@@ -208,15 +208,15 @@ impl Client {
             } else {
                 Err(other("no supported method given"))
             }
-        }).boxed();
+        }));
 
         // After we've concluded that one of the client's supported methods is
         // `METH_NO_AUTH`, we "ack" this to the client by sending back that
         // information. Here we make use of the `write_all` combinator which
         // works very similarly to the `read_exact` combinator.
-        let part1 = authenticated.and_then(|conn| {
+        let part1 = Box::new(authenticated.and_then(|conn| {
             write_all(conn, [v5::VERSION, v5::METH_NO_AUTH])
-        }).boxed();
+        }));
 
         // Next up, we get a selected protocol version back from the client, as
         // well as a command indicating what they'd like to do. We just verify
@@ -225,7 +225,7 @@ impl Client {
         //
         // As above, we're using `and_then` not only for chaining "blocking
         // computations", but also to perform fallible computations.
-        let ack = part1.and_then(|(conn, _)| {
+        let ack = Box::new(part1.and_then(|(conn, _)| {
             read_exact(conn, [0u8]).and_then(|(conn, buf)| {
                 if buf[0] == v5::VERSION {
                     Ok(conn)
@@ -233,8 +233,8 @@ impl Client {
                     Err(other("didn't confirm with v5 version"))
                 }
             })
-        }).boxed();
-        let command = ack.and_then(|conn| {
+        }));
+        let command = Box::new(ack.and_then(|conn| {
             read_exact(conn, [0u8]).and_then(|(conn, buf)| {
                 if buf[0] == v5::CMD_CONNECT {
                     Ok(conn)
@@ -242,7 +242,7 @@ impl Client {
                     Err(other("unsupported command"))
                 }
             })
-        }).boxed();
+        }));
 
         // After we've negotiated a command, there's one byte which is reserved
         // for future use, so we read it and discard it. The next part of the
@@ -493,7 +493,7 @@ impl Client {
     }
 }
 
-fn mybox<F: Future + 'static>(f: F) -> Box<Future<Item=F::Item, Error=F::Error>> {
+fn mybox<F: Future + 'static>(f: F) -> Box<dyn Future<Item=F::Item, Error=F::Error>> {
     Box::new(f)
 }
 
@@ -597,7 +597,7 @@ impl Future for Transfer {
 
             let n = try_nb!((&*self.reader).read(&mut buffer));
             if n == 0 {
-                try!(self.writer.shutdown(Shutdown::Write));
+                self.writer.shutdown(Shutdown::Write)?;
                 return Ok(self.amt.into())
             }
             self.amt += n as u64;
@@ -606,7 +606,7 @@ impl Future for Transfer {
             // that would play into the logic mentioned above (tracking read
             // rates and write rates), so we just ferry along that error for
             // now.
-            let m = try!((&*self.writer).write(&buffer[..n]));
+            let m = (&*self.writer).write(&buffer[..n])?;
             assert_eq!(n, m);
         }
     }
@@ -630,18 +630,18 @@ fn name_port(addr_buf: &[u8]) -> io::Result<UrlHost> {
     // The last two bytes of the buffer are the port, and the other parts of it
     // are the hostname.
     let hostname = &addr_buf[..addr_buf.len() - 2];
-    let hostname = try!(str::from_utf8(hostname).map_err(|_e| {
+    let hostname = str::from_utf8(hostname).map_err(|_e| {
         other("hostname buffer provided was not valid utf-8")
-    }));
+    })?;
     let pos = addr_buf.len() - 2;
     let port = ((addr_buf[pos] as u16) << 8) | (addr_buf[pos + 1] as u16);
 
     if let Ok(ip) = hostname.parse() {
         return Ok(UrlHost::Addr(SocketAddr::new(ip, port)))
     }
-    let name = try!(Name::parse(hostname, Some(&Name::root())).map_err(|e| {
+    let name = Name::parse(hostname, Some(&Name::root())).map_err(|e| {
         io::Error::new(io::ErrorKind::Other, e.to_string())
-    }));
+    })?;
     Ok(UrlHost::Name(name, port))
 }
 
