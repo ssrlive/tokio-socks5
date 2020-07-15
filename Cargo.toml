@@ -3,7 +3,16 @@ name = "tokio-socks5"
 version = "0.1.0"
 authors = ["Alex Crichton <alex@alexcrichton.com>"]
 
+[lib]
+name = "tokio_socks5"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tokio-socks5"
+path = "bin/tokio_socks5.rs"
+
 [dependencies]
+clap = "2"
 log = "0.4.8"
 futures = "0.1"
 tokio-core = "0.1.17"

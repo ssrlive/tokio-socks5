@@ -36,7 +36,7 @@ fn smoke() {
     let server_addr = listener.local_addr().unwrap();
 
     // Spawn our proxy and wait for it to come online
-    let proxy = Command::new(bin()).arg(proxy_addr)
+    let proxy = Command::new(bin()).arg("--bind").arg(proxy_addr)
                                    .spawn()
                                    .unwrap();
     let _proxy = KillOnDrop(proxy);
